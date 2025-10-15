@@ -312,30 +312,39 @@
 </div>
 
 <style>
-  /* --- MODIFIED CSS for Scrolling --- */
   .chat-page-container {
     display: flex;
     flex-direction: column;
-    /* REMOVED height: 100%; */
-    min-height: 100%; /* Make sure it fills the space in the flex container */
+    min-height: 100%;
     max-width: 900px;
     margin: 0 auto;
   }
   .chat-log {
     flex-grow: 1;
-    /* REMOVED overflow-y: auto; */
     padding: 0 1rem;
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
     scroll-behavior: smooth;
   }
-  /* --- END MODIFIED CSS --- */
 
+  /* --- MODIFIED CSS for Sticky Input --- */
+  .chat-input-area {
+    padding: 1.5rem 0 1rem 0;
+    flex-shrink: 0;
+    
+    /* ADD THESE LINES */
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+    background-color: var(--background-primary);
+  }
+
+  /* --- The rest of the styles are unchanged --- */
   .message-text{margin:0;padding:0;white-space:pre-wrap;word-wrap:break-word;font-family:inherit;font-size:inherit;line-height:inherit}.message-text:not(:last-child){margin-bottom:1rem}.chat-log{margin-top:1rem}.message{position:relative;display:flex;max-width:95%}.message.user{align-self:flex-end;flex-direction:row-reverse}.message.model{align-self:flex-start}.message-content{padding:.75rem 1.25rem;border-radius:18px;position:relative;width:100%;line-height:1.6}.message.user .message-content{background-color:var(--accent-color);color:#131314;border-bottom-right-radius:4px}.message.model .message-content{background-color:var(--background-secondary);border-bottom-left-radius:4px;min-height:2.5rem}.thinking-placeholder{color:var(--text-secondary);animation:blink 1.5s infinite}@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}.message-actions{position:absolute;top:-12px;display:flex;gap:.5rem;opacity:0;visibility:hidden;transition:opacity .2s;z-index:5}.message:hover .message-actions{opacity:1;visibility:visible}.message.user .message-actions{right:10px}.message.model .message-actions{right:10px}.action-button{background-color:var(--background-tertiary);border:1px solid var(--border-color);color:var(--text-secondary);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;cursor:pointer}.action-button:hover{color:var(--text-primary);background-color:#3c4043}
   .edit-wrapper{display:flex;flex-direction:column;gap:.5rem}
   .edit-textarea{width:100%;resize:vertical;background-color:transparent;color:inherit;border:none;outline:none;padding:0}.edit-textarea:focus{box-shadow:0 0 0 2px var(--accent-color);border-radius:4px;margin:-2px;padding:2px}
   .edit-actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:.5rem}.edit-button{background-color:transparent;border:1px solid var(--border-color);color:var(--text-primary);padding:.25rem .75rem;border-radius:6px;cursor:pointer}.edit-button.save{background-color:var(--accent-color);color:var(--background-primary);border-color:var(--accent-color)}
-  .chat-input-area{padding:1.5rem 0 1rem 0;flex-shrink:0}.input-wrapper{display:flex;align-items:flex-end;background-color:var(--background-secondary);border-radius:16px;padding:.75rem}textarea{flex-grow:1;background:transparent;border:none;outline:none;color:var(--text-primary);font-family:inherit;font-size:1rem;resize:none;max-height:250px;line-height:1.6;padding:0 .75rem}.send-button{background-color:var(--accent-color);border:none;border-radius:10px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;transition:opacity .2s,background-color .2s}.send-button svg{color:var(--background-primary)}textarea:disabled,.send-button:disabled{opacity:.5;cursor:not-allowed}.send-button:not(:disabled):hover{background-color:#a1c4f8}.empty-chat-prompt{margin:auto;color:var(--text-secondary);font-size:1.2rem}
+  .input-wrapper{display:flex;align-items:flex-end;background-color:var(--background-secondary);border-radius:16px;padding:.75rem}textarea{flex-grow:1;background:transparent;border:none;outline:none;color:var(--text-primary);font-family:inherit;font-size:1rem;resize:none;max-height:250px;line-height:1.6;padding:0 .75rem}.send-button{background-color:var(--accent-color);border:none;border-radius:10px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;transition:opacity .2s,background-color .2s}.send-button svg{color:var(--background-primary)}textarea:disabled,.send-button:disabled{opacity:.5;cursor:not-allowed}.send-button:not(:disabled):hover{background-color:#a1c4f8}.empty-chat-prompt{margin:auto;color:var(--text-secondary);font-size:1.2rem}
   .input-footer{display:flex;justify-content:flex-end;padding:.5rem 1rem 0 1rem}.token-counter{font-size:.8rem;color:var(--text-secondary)}
 </style>
