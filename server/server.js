@@ -1,11 +1,32 @@
 'use strict';
 
 require('dotenv').config();
-const fastify = require('fastify')({ logger: true });
+const path = require('path');
+
+// --- NEW: Check for debug flag ---
+const isDebug = process.argv.includes('-debug');
+
+// --- NEW: Configure logger based on debug flag ---
+const loggerConfig = isDebug 
+  ? {
+      level: 'debug', // Show debug, info, warn, error
+      transport: {
+        target: 'pino-pretty',
+        options: {
+          translateTime: 'HH:MM:ss Z', // Human-readable time
+          ignore: 'pid,hostname,reqId,res,responseTime', // Useless noise
+          messageFormat: '[{req.method} {req.url}] {msg}', // Clean message format
+        },
+      },
+    }
+  : { 
+      level: 'info' // Production: Show info, warn, error
+    }; 
+    
+const fastify = require('fastify')({ logger: loggerConfig });
 const cors = require('@fastify/cors');
 const { GoogleGenAI } = require('@google/genai');
 const Database = require('better-sqlite3');
-const path = require('path');
 
 const PORT = 3001;
 const DB_PATH = path.join(__dirname, 'db', 'chat_history.db');
@@ -30,8 +51,10 @@ const startServer = async () => {
 
   await fastify.register(cors, { origin: true, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] });
   
+  // --- NEW: Improved Error Handler with Logging ---
   fastify.setErrorHandler(async (error, request, reply) => {
-    fastify.log.error(error);
+    fastify.log.error({ url: request.raw.url, method: request.method }, `Error in handler: ${error.message}`);
+    fastify.log.debug(error.stack); // Log full stack only in debug mode
     if (!reply.sent) {
       reply.status(500).send({ error: 'An internal server error occurred.' });
     }
@@ -40,31 +63,42 @@ const startServer = async () => {
 
   // --- CONVERSATION ROUTES ---
   fastify.get('/api/conversations', async (request, reply) => {
+    fastify.log.info('Fetching conversation list.');
     const conversations = db.prepare("SELECT id, title, model, created_at FROM conversations WHERE id IN (SELECT DISTINCT conversation_id FROM messages) ORDER BY created_at DESC").all();
     reply.send(conversations);
   });
 
   fastify.post('/api/conversations', async (request, reply) => {
+    fastify.log.info('Request to create new conversation.');
+    fastify.log.debug({ body: request.body }, 'Create conversation payload:');
     const { title, model, systemPrompt } = request.body;
     const info = createConversationStmt.run(title, model, systemPrompt || null);
-    reply.send({ id: info.lastInsertRowid, title, model, systemPrompt });
+    const newConversation = { id: info.lastInsertRowid, title, model, systemPrompt };
+    fastify.log.info(`New conversation created with ID: ${newConversation.id}`);
+    reply.send(newConversation);
   });
 
   fastify.get('/api/conversations/:id', async (request, reply) => {
     const conversationId = parseInt(request.params.id, 10);
+    fastify.log.info(`Fetching data for conversation ID: ${conversationId}`);
     const conversation = db.prepare("SELECT * FROM conversations WHERE id = ?").get(conversationId);
-    if (!conversation) return reply.status(4404).send({ error: 'Conversation not found' });
+    if (!conversation) return reply.status(404).send({ error: 'Conversation not found' });
     const messages = getConversationHistoryStmt.all(conversationId);
+    fastify.log.debug(`Found ${messages.length} messages for conversation ${conversationId}.`);
     reply.send({ ...conversation, messages });
   });
 
   fastify.delete('/api/conversations/:id', async (request, reply) => {
-    db.prepare("DELETE FROM conversations WHERE id = ?").run(parseInt(request.params.id, 10));
+    const conversationId = parseInt(request.params.id, 10);
+    fastify.log.info(`Deleting conversation ID: ${conversationId}`);
+    db.prepare("DELETE FROM conversations WHERE id = ?").run(conversationId);
     reply.status(204).send();
   });
 
   fastify.patch('/api/conversations/:id', async (request, reply) => {
     const conversationId = parseInt(request.params.id, 10);
+    fastify.log.info(`Updating conversation ID: ${conversationId}`);
+    fastify.log.debug({ body: request.body }, 'Update conversation payload:');
     const updates = [];
     const values = [];
     const allowedFields = { systemPrompt: 'system_prompt', model: 'model' };
@@ -83,28 +117,24 @@ const startServer = async () => {
   
   fastify.post('/api/conversations/:id/generate-title', async (request, reply) => {
     const conversationId = parseInt(request.params.id, 10);
+    fastify.log.info(`Generating title for conversation ID: ${conversationId}`);
     const messages = db.prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT 2").all(conversationId);
     if (messages.length < 1) return reply.status(400).send({ error: 'Not enough messages' });
-    
     const titleGenPrompt = `Based on the following conversation, create a short, descriptive title (5 words maximum) for a chat history list. The title should be from the perspective of the "user". Do not use quotes. Conversation:\n${messages.map(m => `${m.role}: ${m.content}`).join('\n')}\n\nTitle:`;
-    
-    // --- CORRECTED: Use googleAI.models.generateContent directly ---
     const result = await googleAI.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-1.5-flash-latest', // NOTE: Adjusted model name for wider availability
         contents: [{ role: 'user', parts: [{ text: titleGenPrompt }] }],
     });
-    
     const title = result.response.text().trim().replace(/"/g, '');
-    
     db.prepare("UPDATE conversations SET title = ? WHERE id = ?").run(title, conversationId);
+    fastify.log.info(`Generated title for conversation ${conversationId}: "${title}"`);
     reply.send({ title });
   });
 
   fastify.post('/api/conversations/branch', async (request, reply) => {
     const { sourceConversationId, sourceMessageId } = request.body;
-    if (!sourceConversationId || !sourceMessageId) {
-        return reply.status(400).send({ error: 'sourceConversationId and sourceMessageId are required.' });
-    }
+    fastify.log.info(`Branching from conversation ${sourceConversationId} at message ${sourceMessageId}`);
+    fastify.log.debug({ body: request.body }, 'Branching payload:');
     const branch = db.transaction(() => {
         const sourceMessage = db.prepare("SELECT created_at FROM messages WHERE id = ?").get(sourceMessageId);
         if (!sourceMessage) throw new Error('Source message not found');
@@ -120,38 +150,61 @@ const startServer = async () => {
         return { newConversationId };
     });
     const result = branch();
+    fastify.log.info(`Created new branch with conversation ID: ${result.newConversationId}`);
     reply.send(result);
   });
   
   fastify.post('/api/conversations/:id/count-tokens', async (request, reply) => {
-      const { messages, model } = request.body;
-      if (!messages || !model) return reply.status(400).send({ error: 'Messages and model are required.' });
+      const conversationId = parseInt(request.params.id, 10);
+      fastify.log.info(`Counting tokens for conversation ID: ${conversationId}`);
+      fastify.log.debug({ body: request.body }, 'Count tokens payload:');
       
-      const contents = messages.map((msg) => ({
+      const { messages, model } = request.body;
+      // --- NEW: Add validation to prevent server crash ---
+      if (!messages || !Array.isArray(messages) || !model) {
+        fastify.log.warn('Count tokens called with invalid payload.');
+        return reply.status(400).send({ error: 'Messages array and model are required.' });
+      }
+
+      // Filter out any potential empty messages that could cause an API error
+      const validMessages = messages.filter(m => m && m.content && m.content.trim() !== "");
+      if (validMessages.length === 0) {
+        fastify.log.debug('No content to count, returning 0 tokens.');
+        return reply.send({ totalTokens: 0 });
+      }
+
+      const contents = validMessages.map((msg) => ({
           role: msg.role,
           parts: [{ text: msg.content }],
       }));
-
-      // --- CORRECTED: Use googleAI.models.countTokens directly ---
+      
       const count = await googleAI.models.countTokens({ model, contents });
+      fastify.log.debug(`Token count for conversation ${conversationId}: ${count.totalTokens}`);
       reply.send(count);
   });
 
   // --- MESSAGE ROUTES ---
   fastify.delete('/api/messages/:id', async (request, reply) => {
-    db.prepare("DELETE FROM messages WHERE id = ?").run(parseInt(request.params.id, 10));
+    const messageId = parseInt(request.params.id, 10);
+    fastify.log.info(`Deleting message ID: ${messageId}`);
+    db.prepare("DELETE FROM messages WHERE id = ?").run(messageId);
     reply.status(204).send();
   });
   
   fastify.patch('/api/messages/:id', async (request, reply) => {
+      const messageId = parseInt(request.params.id, 10);
+      fastify.log.info(`Updating message ID: ${messageId}`);
+      fastify.log.debug({ body: request.body }, 'Update message payload:');
       const { content } = request.body;
       if (content === undefined) return reply.status(400).send({ error: 'Content field is required.' });
-      db.prepare("UPDATE messages SET content = ? WHERE id = ?").run(content, parseInt(request.params.id, 10));
+      db.prepare("UPDATE messages SET content = ? WHERE id = ?").run(content, messageId);
       reply.send({ message: 'Message updated successfully.' });
   });
 
   fastify.post('/api/chat/:id/reconcile', async (request, reply) => {
       const conversationId = parseInt(request.params.id, 10);
+      fastify.log.info(`Reconciling state for conversation ID: ${conversationId}`);
+      fastify.log.debug({ body: request.body }, `Reconcile payload has ${request.body?.messages?.length} messages.`);
       const { messages: clientMessages } = request.body;
       if (!clientMessages) return reply.status(400).send({ error: '`messages` array is required.' });
 
@@ -169,6 +222,9 @@ const startServer = async () => {
   fastify.post('/api/chat/:id', async (request, reply) => {
     try {
       const conversationId = parseInt(request.params.id, 10);
+      fastify.log.info(`Processing chat for conversation ID: ${conversationId}`);
+      fastify.log.debug({ body: request.body }, `Chat payload has ${request.body?.messages?.length} messages.`);
+      
       const { messages: clientMessages } = request.body;
       if (!clientMessages) return reply.status(400).send({ error: '`messages` array is required.' });
       
@@ -177,12 +233,12 @@ const startServer = async () => {
       
       const contents = clientMessages.map(msg => ({ role: msg.role, parts: [{ text: msg.content }] }));
       
-      const generationConfig = {}; // Placeholder for future config like temperature, etc.
+      const generationConfig = {};
       const systemInstruction = conversation.system_prompt 
           ? { role: 'system', parts: [{ text: conversation.system_prompt }] }
           : undefined;
 
-      // --- CORRECTED: Use googleAI.models.generateContentStream directly ---
+      fastify.log.info(`Streaming response from model: ${conversation.model}`);
       const result = await googleAI.models.generateContentStream({
         model: conversation.model,
         contents,
@@ -201,6 +257,7 @@ const startServer = async () => {
         }
       }
 
+      fastify.log.info(`Stream finished. Reconciling DB for conversation ${conversationId}.`);
       const reconcileDB = db.transaction(() => {
           deleteAllMessagesStmt.run(conversationId);
           for (const msg of clientMessages) {
@@ -212,11 +269,12 @@ const startServer = async () => {
 
       reply.raw.end();
     } catch (e) {
-      fastify.log.error(`Chat error: ${e.message}`);
+      // The main error handler will catch this, but we can log specific context here
+      fastify.log.error(e, 'An error occurred during chat stream generation.');
       if (!reply.sent) {
         reply.status(500).send({ error: 'AI model failed to generate a response.' });
       } else {
-        reply.raw.end();
+        reply.raw.end(); // Ensure the stream is closed on error
       }
     }
   });

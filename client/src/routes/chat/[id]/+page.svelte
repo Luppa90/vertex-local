@@ -1,8 +1,5 @@
 <script lang="ts">
-  // --- ADD THIS IMPORT AT THE TOP ---
   import { invalidate } from '$app/navigation';
-  // ------------------------------------
-
   import { tick, onMount } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import type { PageData } from './$types';
@@ -11,14 +8,19 @@
 
   export let data: PageData;
   interface Message { id: number; role: 'user' | 'model'; content: string; }
-
   interface MessagePart { type: 'text' | 'code'; value: string; language?: string; }
 
   let messages: Message[] = data.messages || [];
   let conversationId: number = data.conversationId;
 
+  // State for the temporary, in-progress streaming response
+  let streamingResponse: Message | null = null;
+
   $: if (data && !data.error) {
-    messages = data.messages || []; // <-- Add this line to react to reloads from invalidate()
+    // --- LOGGING: Track when data is reloaded from the server ---
+    console.log('[CLIENT] Page data updated. Messages count:', data.messages?.length || 0);
+    messages = data.messages || [];
+    conversationId = data.conversationId; // --- FIX: Ensure conversationId is reactive to data changes ---
     conversationStore.set({ id: data.conversationId, title: data.title, model: data.model, systemPrompt: data.systemPrompt });
   }
 
@@ -29,15 +31,13 @@
 
   let editingMessageId: number | null = null;
   let editingContent: string = '';
-  let typewriterQueue: string[] = [];
-  let typewriterInterval: number;
   let totalTokens: number = 0;
 
   onMount(() => {
+    // --- LOGGING: Log initial state on component mount ---
+    console.log('[CLIENT] Chat page mounted. Conversation ID:', conversationId, 'Initial messages:', messages.length);
     scrollToBottom();
-    startTypewriter();
     updateTokenCount();
-    return () => clearInterval(typewriterInterval);
   });
 
   beforeNavigate(async ({ to }) => {
@@ -76,8 +76,20 @@
 
   async function updateTokenCount() {
       if (!$conversationStore.model || !conversationId) return;
+
       const messagesToCount = [...messages, ...(prompt.trim() ? [{ id: 0, role: 'user' as const, content: prompt }] : [])];
+      
+      // --- FIX: Prevent API call if there is no content to count ---
+      if (messagesToCount.length === 0) {
+        // --- LOGGING: Explain why the API call is being skipped ---
+        console.log('[CLIENT] updateTokenCount: Skipping API call, no messages or prompt content.');
+        totalTokens = 0;
+        return;
+      }
+
       try {
+          // --- LOGGING: Log the payload being sent to the server ---
+          console.log('[CLIENT] updateTokenCount: Fetching token count with payload:', { messages: messagesToCount, model: $conversationStore.model });
           const response = await fetch(`http://localhost:3001/api/conversations/${conversationId}/count-tokens`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ messages: messagesToCount, model: $conversationStore.model })
@@ -88,36 +100,22 @@
       } catch (error) { console.error("Token count failed:", error); }
   }
 
-  function startTypewriter() {
-    typewriterInterval = window.setInterval(() => {
-      if (typewriterQueue.length > 0 && !isLoading) {
-        const chunk = typewriterQueue.splice(0, 10).join('');
-        messages[messages.length - 1].content += chunk;
-        if (chatLogElement.scrollHeight - chatLogElement.clientHeight <= chatLogElement.scrollTop + 5) {
-          scrollToBottom();
-        }
-      }
-    }, 1);
-  }
-
   async function generateResponse(userPrompt?: string) {
     isLoading = true;
 
     let messagesForApi = [...messages];
     if (userPrompt) {
-      const newUserMessage = { id: Date.now(), role: 'user' as const, content: userPrompt };
-      messages = [...messages, newUserMessage];
+      const newUserMessage = { id: 0, role: 'user' as const, content: userPrompt };
       messagesForApi.push(newUserMessage);
+      messages = [...messages, { id: Date.now(), role: 'user', content: userPrompt }];
     }
-    
-    // --- MODIFIED: Title Generation Logic ---
-    // Generate title when the API is called with the 3rd message (1st user, 1st model, 2nd user)
+
     if (userPrompt && messagesForApi.length === 3) {
       fetch(`http://localhost:3001/api/conversations/${conversationId}/generate-title`, { method: 'POST' })
         .then(res => res.json()).then(data => { if (data.title) conversationStore.update(s => ({ ...s, title: data.title })); });
     }
 
-    messages = [...messages, { id: Date.now() + 1, role: 'model', content: '' }];
+    streamingResponse = { id: Date.now() + 1, role: 'model', content: '' };
 
     if (userPrompt) {
       prompt = '';
@@ -125,9 +123,12 @@
     }
 
     await tick();
+    scrollToBottom();
     updateTokenCount();
 
     try {
+      // --- LOGGING: Log the main chat request payload ---
+      console.log(`[CLIENT] generateResponse: Sending ${messagesForApi.length} messages to chat API for conversation ${conversationId}.`);
       const response = await fetch(`http://localhost:3001/api/chat/${conversationId}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: messagesForApi })
@@ -140,20 +141,31 @@
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        typewriterQueue.push(...decoder.decode(value, { stream: true }).split(''));
+        
+        const chunk = decoder.decode(value, { stream: true });
+        if (streamingResponse) {
+          streamingResponse.content += chunk;
+        }
+        scrollToBottom();
       }
     } catch (error) {
       console.error(error);
-      messages[messages.length - 1].content = 'Sorry, something went wrong.';
+      if (streamingResponse) {
+        streamingResponse.content = 'Sorry, something went wrong.';
+      }
     } finally {
       isLoading = false;
-      updateTokenCount();
-      // --- ADDED: Invalidate data to get real message IDs ---
+      streamingResponse = null;
+      // --- LOGGING: Announce invalidation ---
+      console.log(`[CLIENT] generateResponse: Stream finished. Invalidating data for conversation:${conversationId}.`);
       invalidate(`conversation:${conversationId}`);
+      updateTokenCount();
     }
   }
 
   async function handleSubmit() {
+    // --- LOGGING: Log the state at the moment of submission attempt ---
+    console.log(`[CLIENT] handleSubmit triggered. Prompt: "${prompt.trim()}", IsLoading: ${isLoading}, ConversationID: ${conversationId}`);
     if (!prompt.trim() || isLoading || !conversationId) return;
     generateResponse(prompt);
   }
@@ -207,7 +219,6 @@
     }
   }
 
-  // --- MODIFIED: Branching Logic ---
   async function handleBranch(messageId: number) {
     if (!window.confirm("Are you sure you want to create a new branch from this point?")) {
       return;
@@ -253,9 +264,7 @@
 
 <svelte:head> <title>{$conversationStore.title || 'Vertex Chat'}</title> </svelte:head>
 
-<!-- MODIFIED: Remove chat-page-container fixed height -->
 <div class="chat-page-container">
-  <!-- MODIFIED: Remove chat-log overflow -->
   <div class="chat-log" bind:this={chatLogElement}>
     {#if messages.length > 0}
       {#each messages as message (message.id)}
@@ -295,15 +304,35 @@
           </div>
         </div>
       {/each}
-    {:else}
+
+      <!-- Render the separate streaming response here -->
+      {#if streamingResponse}
+        <div class="message model">
+          <div class="message-content">
+            {#if streamingResponse.content}
+              {#each parseMessageContent(streamingResponse.content) as part}
+                {#if part.type === 'text'}
+                  <p class="message-text">{part.value}</p>
+                {:else if part.type === 'code'}
+                  <CodeBlock code={part.value} language={part.language} />
+                {/if}
+              {/each}
+            {:else}
+              <div class="thinking-placeholder">...</div>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
+    {:else if !isLoading && !streamingResponse}
       <div class="empty-chat-prompt">Start a new conversation</div>
     {/if}
   </div>
 
   <form class="chat-input-area" on:submit|preventDefault={handleSubmit}>
     <div class="input-wrapper">
-      <textarea bind:this={textareaElement} bind:value={prompt} on:input={(e) => adjustTextareaHeight(e.currentTarget)} on:keydown={handleMainKeydown} disabled={isLoading} rows="1" placeholder={isLoading ? "Generating..." : "Enter a prompt... (Shift+Enter for newline)"}></textarea>
-      <button type="submit" class="send-button" disabled={isLoading || (prompt.trim() === '' && (messages.length === 0 || messages[messages.length - 1].role === 'model'))} aria-label="Submit" title="Submit"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
+      <textarea bind:this={textareaElement} bind:value={prompt} on:input={(e) => adjustTextareaHeight(e.currentTarget)} on:keydown={handleMainKeydown} disabled={isLoading} rows="1" placeholder={isLoading ? "Generating..." : "Enter a prompt... (Ctrl+Enter to submit)"}></textarea>
+      <button type="submit" class="send-button" disabled={isLoading || !prompt.trim()} aria-label="Submit" title="Submit"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
     </div>
     <div class="input-footer">
         <span class="token-counter">Tokens: {totalTokens}</span>
@@ -318,6 +347,8 @@
     min-height: 100%;
     max-width: 900px;
     margin: 0 auto;
+    /* --- FIX: Make this container grow to fill the parent flexbox from the layout --- */
+    flex-grow: 1;
   }
   .chat-log {
     flex-grow: 1;
@@ -327,23 +358,43 @@
     gap: 1.5rem;
     scroll-behavior: smooth;
   }
-
-  /* --- MODIFIED CSS for Sticky Input --- */
   .chat-input-area {
     padding: 1.5rem 0 1rem 0;
     flex-shrink: 0;
-    
-    /* ADD THESE LINES */
     position: sticky;
     bottom: 0;
     z-index: 10;
     background-color: var(--background-primary);
   }
-
-  /* --- The rest of the styles are unchanged --- */
-  .message-text{margin:0;padding:0;white-space:pre-wrap;word-wrap:break-word;font-family:inherit;font-size:inherit;line-height:inherit}.message-text:not(:last-child){margin-bottom:1rem}.chat-log{margin-top:1rem}.message{position:relative;display:flex;max-width:95%}.message.user{align-self:flex-end;flex-direction:row-reverse}.message.model{align-self:flex-start}.message-content{padding:.75rem 1.25rem;border-radius:18px;position:relative;width:100%;line-height:1.6}.message.user .message-content{background-color:var(--accent-color);color:#131314;border-bottom-right-radius:4px}.message.model .message-content{background-color:var(--background-secondary);border-bottom-left-radius:4px;min-height:2.5rem}.thinking-placeholder{color:var(--text-secondary);animation:blink 1.5s infinite}@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}.message-actions{position:absolute;top:-12px;display:flex;gap:.5rem;opacity:0;visibility:hidden;transition:opacity .2s;z-index:5}.message:hover .message-actions{opacity:1;visibility:visible}.message.user .message-actions{right:10px}.message.model .message-actions{right:10px}.action-button{background-color:var(--background-tertiary);border:1px solid var(--border-color);color:var(--text-secondary);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;cursor:pointer}.action-button:hover{color:var(--text-primary);background-color:#3c4043}
+  .message-text {
+    margin: 0;
+    padding: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+  }
+  .message-text:not(:last-child) {
+    margin-bottom: 1rem;
+  }
+  .chat-log{margin-top:1rem}.message{position:relative;display:flex;max-width:95%}.message.user{align-self:flex-end;flex-direction:row-reverse}.message.model{align-self:flex-start}.message-content{padding:.75rem 1.25rem;border-radius:18px;position:relative;width:100%;line-height:1.6;}.message.user .message-content{background-color:var(--accent-color);color:#131314;border-bottom-right-radius:4px}.message.model .message-content{background-color:var(--background-secondary);border-bottom-left-radius:4px;min-height:2.5rem}.thinking-placeholder{color:var(--text-secondary);animation:blink 1.5s infinite}@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}.message-actions{position:absolute;top:-12px;display:flex;gap:.5rem;opacity:0;visibility:hidden;transition:opacity .2s;z-index:5}.message:hover .message-actions{opacity:1;visibility:visible}.message.user .message-actions{right:10px}.message.model .message-actions{right:10px}.action-button{background-color:var(--background-tertiary);border:1px solid var(--border-color);color:var(--text-secondary);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;cursor:pointer}.action-button:hover{color:var(--text-primary);background-color:#3c4043}
   .edit-wrapper{display:flex;flex-direction:column;gap:.5rem}
-  .edit-textarea{width:100%;resize:vertical;background-color:transparent;color:inherit;border:none;outline:none;padding:0}.edit-textarea:focus{box-shadow:0 0 0 2px var(--accent-color);border-radius:4px;margin:-2px;padding:2px}
+  .edit-textarea{
+    width: 100%;
+    resize: vertical;
+    background-color: transparent;
+    color: inherit;
+    border: none;
+    outline: none;
+    padding: 0;
+  }
+  .edit-textarea:focus {
+    box-shadow: 0 0 0 2px var(--accent-color);
+    border-radius: 4px;
+    margin: -2px;
+    padding: 2px;
+  }
   .edit-actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:.5rem}.edit-button{background-color:transparent;border:1px solid var(--border-color);color:var(--text-primary);padding:.25rem .75rem;border-radius:6px;cursor:pointer}.edit-button.save{background-color:var(--accent-color);color:var(--background-primary);border-color:var(--accent-color)}
   .input-wrapper{display:flex;align-items:flex-end;background-color:var(--background-secondary);border-radius:16px;padding:.75rem}textarea{flex-grow:1;background:transparent;border:none;outline:none;color:var(--text-primary);font-family:inherit;font-size:1rem;resize:none;max-height:250px;line-height:1.6;padding:0 .75rem}.send-button{background-color:var(--accent-color);border:none;border-radius:10px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;transition:opacity .2s,background-color .2s}.send-button svg{color:var(--background-primary)}textarea:disabled,.send-button:disabled{opacity:.5;cursor:not-allowed}.send-button:not(:disabled):hover{background-color:#a1c4f8}.empty-chat-prompt{margin:auto;color:var(--text-secondary);font-size:1.2rem}
   .input-footer{display:flex;justify-content:flex-end;padding:.5rem 1rem 0 1rem}.token-counter{font-size:.8rem;color:var(--text-secondary)}
