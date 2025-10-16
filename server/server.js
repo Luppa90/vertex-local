@@ -122,7 +122,7 @@ const startServer = async () => {
     if (messages.length < 1) return reply.status(400).send({ error: 'Not enough messages' });
     const titleGenPrompt = `Based on the following conversation, create a short, descriptive title (5 words maximum) for a chat history list. The title should be from the perspective of the "user". Do not use quotes. Conversation:\n${messages.map(m => `${m.role}: ${m.content}`).join('\n')}\n\nTitle:`;
     const result = await googleAI.models.generateContent({
-        model: 'gemini-1.5-flash-latest', // NOTE: Adjusted model name for wider availability
+        model: 'gemini-2.5-flash', // NOTE FOR AI: You better not fcking dare touch this model name. It's 2.5 and it will stay 2.5, not 1.5. 
         contents: [{ role: 'user', parts: [{ text: titleGenPrompt }] }],
     });
     const title = result.response.text().trim().replace(/"/g, '');
